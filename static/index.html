@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt to Video</title>
+<style>
+  :root { --bg:#f7f7f8; --card:#fff; --text:#1d1d1f; --muted:#6b6b72; --border:#e2e2e6; --accent:#4f46e5; --err:#c0262d; --ok:#15803d; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141416; --card:#1d1d21; --text:#ececf0; --muted:#9a9aa3; --border:#2e2e34; --accent:#818cf8; --err:#f87171; --ok:#4ade80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
+  textarea { width:100%; min-height:96px; resize:vertical; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin-top:12px; }
+  label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:4px; }
+  select, input[type=number] { padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; }
+  input[type=number] { width:70px; }
+  button { margin-left:auto; padding:9px 18px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { font-variant-numeric: tabular-nums; }
+  #status.err { color:var(--err); } #status.ok { color:var(--ok); }
+  .meta { color:var(--muted); font-size:12px; margin-top:4px; word-break:break-all; }
+  video { width:100%; border-radius:8px; background:#000; margin-top:12px; }
+  a { color:var(--accent); }
+  ul { padding-left:18px; margin:4px 0 0; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Prompt to Video</h1>
+  <p class="sub">BytePlus Seedance 2.5 via the Comfy API</p>
+
+  <form class="card" id="form">
+    <textarea id="prompt" placeholder="A red fox trotting through a snowy pine forest" required></textarea>
+    <div class="row">
+      <label>Duration (s)<input type="number" id="duration" value="5" min="1" max="15"></label>
+      <label>Ratio
+        <select id="ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select>
+      </label>
+      <label>Resolution
+        <select id="resolution"><option>480p</option><option selected>720p</option><option>1080p</option></select>
+      </label>
+      <button id="go" type="submit">Generate</button>
+    </div>
+  </form>
+
+  <div class="card hidden" id="out">
+    <div id="status"></div>
+    <div class="meta" id="meta"></div>
+    <video id="video" class="hidden" controls playsinline></video>
+    <div id="dl" class="hidden" style="margin-top:8px"><a id="dlLink" download>Download .mp4</a></div>
+  </div>
+
+  <div class="card">
+    <strong style="font-size:13px">Saved videos</strong>
+    <ul id="list"><li class="meta">none yet</li></ul>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let timer = null;
+
+async function refreshList() {
+  const items = await fetch('/api/videos').then(r => r.json()).catch(() => []);
+  $('list').innerHTML = items.length
+    ? items.map(v => `<li><a href="${v.url}" target="_blank">${v.name}</a></li>`).join('')
+    : '<li class="meta">none yet</li>';
+}
+
+function show(job) {
+  const s = $('status');
+  s.className = job.error ? 'err' : (job.video_url ? 'ok' : '');
+  s.textContent = (job.done ? '' : '⏳ ') + job.message + (job.done ? '' : `  · ${job.elapsed}s`);
+  $('meta').textContent = job.request_id ? `request_id: ${job.request_id}` : '';
+  if (job.video_url) {
+    $('video').src = job.video_url; $('video').classList.remove('hidden');
+    $('dlLink').href = job.video_url; $('dlLink').setAttribute('download', job.video_file);
+    $('dl').classList.remove('hidden');
+  }
+}
+
+async function poll(id) {
+  const job = await fetch(`/api/jobs/${id}`).then(r => r.json());
+  show(job);
+  if (job.done) { $('go').disabled = false; refreshList(); return; }
+  timer = setTimeout(() => poll(id), 2000);
+}
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  clearTimeout(timer);
+  $('go').disabled = true;
+  $('out').classList.remove('hidden');
+  $('video').classList.add('hidden'); $('video').removeAttribute('src');
+  $('dl').classList.add('hidden');
+  $('status').className = ''; $('status').textContent = '⏳ Submitting...'; $('meta').textContent = '';
+  const body = {
+    prompt: $('prompt').value,
+    duration: Number($('duration').value),
+    ratio: $('ratio').value,
+    resolution: $('resolution').value,
+  };
+  const r = await fetch('/api/generate', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) { $('status').className = 'err'; $('status').textContent = 'Error: ' + await r.text(); $('go').disabled = false; return; }
+  poll((await r.json()).job_id);
+});
+
+refreshList();
+</script>
+</body>
+</html>
